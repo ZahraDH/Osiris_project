@@ -37,3 +37,10 @@ class Message:
         except Exception as e:
             print(f"Deserialization Error: {e}")
             return None
+
+class MessageType:
+    HELLO = "HELLO"
+    CLIENT_REQUEST = "CLIENT_REQUEST" 
+    STATE_UPDATE = "STATE_UPDATE"      
+    COMPUTE_TASK = "COMPUTE_TASK"     
+    RESULT = "RESULT"  

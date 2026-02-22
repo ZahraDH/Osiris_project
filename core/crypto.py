@@ -25,9 +25,13 @@ class CryptoManager:
 
         for filename in os.listdir(self.keys_dir):
             if filename.endswith("_public.pem"):
-                target_id = filename.replace("_public.pem", "")
-                with open(os.path.join(self.keys_dir, filename), "rb") as f:
-                    self.public_keys[target_id] = serialization.load_pem_public_key(f.read())
+                filepath = os.path.join(self.keys_dir, filename)
+                
+                if os.path.isfile(filepath):
+                    target_id = filename.replace("_public.pem", "")
+                    with open(filepath, "rb") as f:
+                        self.public_keys[target_id] = serialization.load_pem_public_key(f.read())
+
 
     def sign(self, message_str):
         if not self.private_key:
