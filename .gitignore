@@ -17,3 +17,4 @@ env/
 *.log
 *.jsonl   
 keys/*_private.pem   
+keys/*_private.*
