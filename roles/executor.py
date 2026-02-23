@@ -111,7 +111,7 @@ class ExecutorNode(Node):
         if not snapshot:
             snapshot = getattr(self.store, '_state', {})
             
-        print(f"🔍 [DEBUG EXECUTOR] Task {task_id} | State used for SUM: {snapshot}")
+        print(f"[DEBUG EXECUTOR] Task {task_id} | State used for SUM: {snapshot}")
 
         try:
             results_iterator = self.tx_engine.execute_streaming(tx, state=snapshot)

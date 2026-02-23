@@ -29,6 +29,8 @@ class CoordinatorNode(Node):
         self.quorum = self.f + 1 
         self.TIMEOUT_LIMIT = 5.0  
         self.active_timeouts = {}
+        self.banned_executors = set()   
+        self.promoted_verifiers = set()
 
     async def process_message(self, message):
         if 'signature' in message:
@@ -221,13 +223,22 @@ class CoordinatorNode(Node):
         task_id_source = f"{tx_string}_seq{agreed_seq}"
         task_id = hashlib.sha256(task_id_source.encode()).hexdigest()[:16]
         
-        executors = sorted([nid for nid in self.peers if nid.startswith("EP")])
+        executors = sorted([
+            nid for nid in self.peers 
+            if (nid.startswith("EP") or nid in self.promoted_verifiers) 
+            and nid not in self.banned_executors
+        ])
         if not executors: return
             
         hash_int = int(task_id, 16)
         assigned_executor = executors[hash_int % len(executors)]
         
-        verifiers = sorted([nid for nid in self.peers if nid.startswith("VP") and "CO" not in nid])
+        verifiers = sorted([
+            nid for nid in self.peers 
+            if nid.startswith("VP") and "CO" not in nid 
+            and nid not in self.promoted_verifiers
+        ])
+
             
         self.tasks[task_id] = {
             "tx": tx,
@@ -405,7 +416,11 @@ class CoordinatorNode(Node):
         original_tx = old_task.get("tx")
         bad_executor = old_task.get("executor_id")
 
-        executors = sorted([nid for nid in self.peers if nid.startswith("EP")])
+        executors = sorted([
+                nid for nid in self.peers 
+                if (nid.startswith("EP") or nid in self.promoted_verifiers) 
+                and nid not in self.banned_executors
+            ])
         new_executor = next((ep for ep in executors if ep != bad_executor), None)
 
         if not new_executor:
@@ -414,7 +429,7 @@ class CoordinatorNode(Node):
 
         new_task_id = hashlib.sha256(f"{old_task_id}_retry".encode()).hexdigest()[:16]
 
-        print(f"[{self.node_id}]REASSIGNING! Task {old_task_id[:8]} taken from {bad_executor} -> Given to {new_executor} (New Task ID: {new_task_id[:8]})")
+        print(f"[{self.node_id}] REASSIGNING! Task {old_task_id[:8]} taken from {bad_executor} -> Given to {new_executor} (New Task ID: {new_task_id[:8]})")
 
         self.tasks[new_task_id] = {
             "tx": original_tx,
@@ -423,7 +438,11 @@ class CoordinatorNode(Node):
             "reassigned": False
         }
 
-        verifiers = sorted([nid for nid in self.peers if nid.startswith("VP")])
+        verifiers = sorted([
+            nid for nid in self.peers 
+            if nid.startswith("VP") and "CO" not in nid 
+            and nid not in self.promoted_verifiers
+        ])
 
         assignment_msg = {
             "type": "TASK_ASSIGNMENT", 
@@ -452,15 +471,32 @@ class CoordinatorNode(Node):
     async def _timeout_handler(self, task_id, executor_id):
         try:
             await asyncio.sleep(self.TIMEOUT_LIMIT)
-            print(f"\n[TIMEOUT DETECTED] Executor '{executor_id}' did not respond in time for task '{task_id}'!")
+            print(f"\n[TIMEOUT DETECTED] Executor '{executor_id}' did not respond in time for task '{task_id[:8]}'!")
             
             if task_id in self.active_timeouts:
                 del self.active_timeouts[task_id]
-            print(f"[REASSIGN] Removing '{executor_id}' from reliable executors and reassigning task...")
+            if executor_id not in self.banned_executors:
+                self.banned_executors.add(executor_id)
+                print(f"[DEMOTION] Banning '{executor_id}' from executor pool...")
+            
+            available_verifiers = sorted([
+                nid for nid in self.peers 
+                if nid.startswith("VP") and "CO" not in nid and nid not in self.promoted_verifiers
+            ])
+            
+            if available_verifiers:
+                promoted_node = available_verifiers[0] 
+                self.promoted_verifiers.add(promoted_node)
+                print(f"[ROLE SWITCH] Promoted '{promoted_node}' from Verifier to Executor to replace {executor_id}!")
+            else:
+                print("[ROLE SWITCH WARNING] No available Verifiers left to promote!")
+
+            print(f"[REASSIGN] Reassigning task '{task_id[:8]}' to the updated network topology...")
             await self.reassign_task(task_id) 
 
         except asyncio.CancelledError:
             pass
+
 
 
 
