@@ -1,4 +1,3 @@
-# test_phase1.py
 import asyncio
 import json
 import os
@@ -6,35 +5,33 @@ from roles.coordinator import CoordinatorNode
 from roles.executor import ExecutorNode
 from roles.client import Client
 from roles.malicious import MaliciousExecutor
-from roles.executor import ExecutorNode
-from core.types import MessageType
+from roles.verifier import VerifierNode
 from core.crypto import CryptoManager
 
 CONFIG_FILE = "config.json"
 
-
-
 async def run_test():
-    print("--- STARTING TRANSACTION SYSTEM TEST ---")
-
-    crypto_exe1 = CryptoManager("EP_1")     
-    crypto_bad = CryptoManager("EP_Bad")
-    crypto_co = CryptoManager("VP_CO")
-
-    crypto_exe1.load_keys()
-    crypto_bad.load_keys()
-    crypto_co.load_keys()
-
+    print("--- STARTING OSIRIS-BFT TRANSACTION SYSTEM TEST ---")
+    cryptos = {}
+    for node_id in ["CO_1", "CO_2", "CO_3", "EP_1", "EP_Bad", "VP_1", "VP_2"]:
+        c = CryptoManager(node_id)
+        c.load_keys()
+        cryptos[node_id] = c
+        
+    co1 = CoordinatorNode("CO_1", cryptos["CO_1"], CONFIG_FILE)
+    co2 = CoordinatorNode("CO_2", cryptos["CO_2"], CONFIG_FILE)
+    co3 = CoordinatorNode("CO_3", cryptos["CO_3"], CONFIG_FILE)
     
-    good_node = ExecutorNode("EP_1", crypto_exe1, CONFIG_FILE)          
-    bad_node = MaliciousExecutor("EP_Bad", crypto_bad, CONFIG_FILE)
-    coordinator = CoordinatorNode("VP_CO", crypto_co, CONFIG_FILE)
+    ep1 = ExecutorNode("EP_1", cryptos["EP_1"], CONFIG_FILE)          
+    ep_bad = MaliciousExecutor("EP_Bad", cryptos["EP_Bad"], CONFIG_FILE)
+    
+    vp1 = VerifierNode("VP_1", cryptos["VP_1"], CONFIG_FILE)
+    vp2 = VerifierNode("VP_2", cryptos["VP_2"], CONFIG_FILE)
 
     client = Client("Client", CONFIG_FILE)
-
-
+    
     tasks = []
-    nodes = [coordinator, good_node, bad_node, client]
+    nodes = [co1, co2, co3, ep1, ep_bad, vp1, vp2, client]
     for node in nodes:
         tasks.append(asyncio.create_task(node.start()))
 
@@ -42,45 +39,36 @@ async def run_test():
     await asyncio.sleep(2)
 
     print("\n--- SCENARIO A: STATE REPLICATION ---")
-
+    
     tx1 = {"op": "SET", "args": {"key": "price", "value": 100}}
-    await client.submit_transaction(tx1)
+    await client.submit_transaction(tx1, targets=["CO_1"])
 
     tx2 = {"op": "SET", "args": {"key": "tax", "value": 20}}
-    await client.submit_transaction(tx2)
+    await client.submit_transaction(tx2, targets=["CO_1"])
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(2) 
 
-    print(f"   [Test Check] EP1 State: {good_node.store._state}")
-    print(f"   [Test Check] EP_Bad State: {bad_node.store._state}")
+    print(f"   [Test Check] EP_1 State: {ep1.store._state}")
+    print(f"   [Test Check] EP_Bad State: {ep_bad.store._state}")
 
-    if good_node.store.get('price') == 100 and good_node.store.get('tax') == 20:
+    if ep1.store.get('price') == 100 and ep1.store.get('tax') == 20:
         print("PASS: Honest Executor has correct state.")
     else:
         print("FAIL: Honest Executor state mismatch.")
 
 
-    print("\n--- SCENARIO B: COMPUTATION & FAULT TOLERANCE ---")
-
-
+    print("\n--- SCENARIO B: COMPUTATION & CHUNK VERIFICATION (OsirisBFT) ---")
     tx_sum = {"op": "SUM_ALL", "args": {}}
-
-    print("   [Client] Requesting SUM_ALL (Expected: 120)... sending requests...")
-
-    for i in range(1, 4):
-        print(f"\n   --- Request #{i} ---")
-        await client.submit_transaction(tx_sum)
-        await asyncio.sleep(1.5)
-
-    print("\n--- TEST COMPLETED ---")
-
-    for node in nodes:
-        await node.stop()
-    for t in tasks:
-        t.cancel()
-
+    print("   [Client] Requesting SUM_ALL... sending to all 3 Coordinators...")
+    await client.submit_transaction(tx_sum, targets=["CO_1", "CO_2", "CO_3"])
+    await asyncio.sleep(3) 
+    print("--- TEST COMPLETE ---")
+    
 
 if __name__ == "__main__":
+    if not os.path.exists(CONFIG_FILE):
+        print(f"ERROR: '{CONFIG_FILE}' not found! Please create it first.")
+        exit(1)
     try:
         asyncio.run(run_test())
     except KeyboardInterrupt:

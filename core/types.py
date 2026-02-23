@@ -37,6 +37,16 @@ class Message:
         except Exception as e:
             print(f"Deserialization Error: {e}")
             return None
+        
+class ResultChunk:
+    def __init__(self, task_id, chunk_index, total_chunks, data):
+        self.task_id = task_id
+        self.chunk_index = chunk_index
+        self.total_chunks = total_chunks
+        self.data = data 
+
+    def to_dict(self):
+        return self.__dict__
 
 class MessageType:
     HELLO = "HELLO"
@@ -44,3 +54,7 @@ class MessageType:
     STATE_UPDATE = "STATE_UPDATE"      
     COMPUTE_TASK = "COMPUTE_TASK"     
     RESULT = "RESULT"  
+    TASK_ASSIGNMENT = "TASK_ASSIGNMENT"  
+    RESULT_CHUNK = "RESULT_CHUNK"  
+    VERIFICATION_VOTE = "VERIFICATION_VOTE"
+    CHUNK_RESULT = "CHUNK_RESULT"

@@ -7,15 +7,16 @@ class MaliciousExecutor(ExecutorNode):
         super().__init__(node_id, crypto_manager, config_path)
         print(f"[{self.node_id}] Started (MALICIOUS MODE)")
 
-    async def handle_compute_task(self, payload, request_id, sender):
-        task_id = payload['task_id']
-        fake_result = -999999
-
-        print(f"[{self.node_id}] Received Task {task_id[:6]}. Returning FAKE result: {fake_result}")
-
-        response_payload = {
-            "task_id": task_id,
-            "result": fake_result,  
-            "node_id": self.node_id
-        }
-        await self._send_secure_reply(sender, request_id, response_payload)
+    async def execute_and_stream(self, task_id, *args, **kwargs):
+        try:
+            print(f"[{self.node_id}] MALICIOUS: Generating FAKE chunk for Task {task_id[:8]}...")
+            
+            fake_chunk = [{"result": -999999}]
+            await self._broadcast_chunk_to_verifiers(
+                task_id=task_id, 
+                chunk=fake_chunk, 
+                chunk_index=0, 
+                is_final=True
+            )
+        except Exception as e:
+            print(f"[{self.node_id}] Malicious Execute Failed: {e}")

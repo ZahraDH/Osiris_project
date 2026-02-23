@@ -37,6 +37,7 @@ try:
         for node_id in config["nodes"]:
             generate_key_pair(node_id)
 except FileNotFoundError:
-    nodes = ["VP_CO", "EP_1", "EP_Good", "EP_Bad"]
+    # utils/keygen.py
+    nodes = ["CO_1", "CO_2", "CO_3", "EP_1", "EP_Bad", "VP_1", "VP_2", "Client"]
     for n in nodes:
         generate_key_pair(n)

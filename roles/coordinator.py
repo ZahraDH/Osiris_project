@@ -3,6 +3,7 @@ import asyncio
 import json
 import uuid
 import time
+import hashlib
 from core.node import Node
 from utils.transfer_to_string import get_deterministic_string
 from core.state import VersionedKVStore
@@ -10,16 +11,18 @@ from core.transaction import TransactionEngine
 from core.types import MessageType
 
 class CoordinatorNode(Node):
-    def __init__(self, node_id,crypto_manager, config_path=None):
+    def __init__(self, node_id,crypto_manager, config_path=None, f=1):
         if config_path:
             super().__init__(node_id, config_path)
         else:
             super().__init__(node_id)
         self.pending_tasks = {}
         self.crypto = crypto_manager
-        self.oracle_state = VersionedKVStore()
         self.seq_counter = 0
+        self.f = f
+        self.verification_state = {}
         self.tx_engine = TransactionEngine()
+        self.tasks = {}
 
     async def process_message(self, message):
         if 'signature' in message:
@@ -27,7 +30,6 @@ class CoordinatorNode(Node):
             signature = message.get("signature")
             content_str = message.get("content") 
             
-
             is_valid = self.crypto.verify(sender_id, content_str, signature)
             
             if not is_valid:
@@ -35,6 +37,7 @@ class CoordinatorNode(Node):
                 return {"status": "error"}
             else:
                 print(f"[VP_CO] Valid signature from {sender_id}")
+                pass
             
             try:
                 msg_data = json.loads(content_str)
@@ -50,7 +53,7 @@ class CoordinatorNode(Node):
             await self.handle_client_request(payload)
             return {"status": "received"}
         
-        if msg_type == "RESULT":
+        elif msg_type == "RESULT":
             task_id = msg_data.get("task_id")
             result = msg_data.get("result")
             sender = msg_data.get("sender")
@@ -59,10 +62,45 @@ class CoordinatorNode(Node):
                 future = self.pending_tasks[task_id]
                 if not future.done():
                     future.set_result((sender, result))
+            return {"status": "received"}
+            
+        elif msg_type == "STATE_UPDATE" or msg_type == getattr(MessageType, 'STATE_UPDATE', 'STATE_UPDATE'):
+            return {"status": "received"}
+            
+        elif msg_type == "TASK_ASSIGNMENT" or msg_type == getattr(MessageType, 'TASK_ASSIGNMENT', 'TASK_ASSIGNMENT'):
+            await self.handle_task_assignment(msg_data)
+            return {"status": "received"}
+        
+        elif msg_type == "VERIFICATION_VOTE" or msg_type == getattr(MessageType, 'VERIFICATION_VOTE', 'VERIFICATION_VOTE'):
+            task_id = msg_data.get("task_id", "UNKNOWN")
+            short_task_id = task_id[:8]
+            verifier_id = msg_data.get("verifier_id", "Unknown")
+            is_valid = msg_data.get("is_valid", False)
+            reason = msg_data.get("result", "")
+            
+            status = "APPROVED" if is_valid else "REJECTED"
+            print(f"[{self.node_id}] Vote from {verifier_id} for Task {task_id}: {status} -> {reason}")
+            
+            if task_id in self.tasks:
+                if verifier_id not in self.tasks[task_id]["votes"]["voters"]:
+                    self.tasks[task_id]["votes"]["voters"].add(verifier_id)
+                    
+                    if is_valid:
+                        self.tasks[task_id]["votes"]["approve"] += 1
+                    else:
+                        self.tasks[task_id]["votes"]["reject"] += 1
+                        
+                        if self.tasks[task_id]["votes"]["reject"] >= 2 and not self.tasks[task_id]["reassigned"]:
+                            self.tasks[task_id]["reassigned"] = True
+                            asyncio.create_task(self.reassign_task(task_id))
             
             return {"status": "received"}
             
+        else:
+            print(f"[{self.node_id}] Received: UNKNOWN TYPE -> {msg_type}")
+            
         return await super().process_message(message)
+
     
     
     async def handle_client_request(self, tx):
@@ -73,7 +111,7 @@ class CoordinatorNode(Node):
                 pass
 
         op = tx.get("op", "").upper()
-        if op in ["SET", "ADD", "SUB"]:
+        if op in ["SET", "ADD", "SUB", "ADD_EDGE"]:
             print(f"[VP_CO] Client requests WRITE: {op}")
             await self.propose_state_update(tx)
         else:
@@ -84,63 +122,137 @@ class CoordinatorNode(Node):
         self.seq_counter += 1
         seq = self.seq_counter
 
-        try:
-            self.tx_engine.execute(tx, mode='write', state=self.oracle_state)
-            self.oracle_state.commit_version(seq)
-            print(f"[VP_CO] Proposed Update Seq {seq}: {tx.get('args')} -> Committed to Oracle")
-        except Exception as e:
-            print(f"[VP_CO] Oracle Error: {e}")
-            return
-
         update_msg = {
             "type": "STATE_UPDATE", 
             "seq": seq, 
             "tx": tx
         }
         
-        executors = [nid for nid in self.peers if nid.startswith("EP")]
-        for ep in executors:
-            await self._send_signed_message_fire_and_forget(ep, update_msg)
+        print(f"[{self.node_id}] Proposing State Update Seq {seq}: {tx.get('args')}")
+        
+        for peer_id in self.peers:
+            await self._send_signed_message_fire_and_forget(peer_id, update_msg)
+            
 
     async def assign_compute_task(self, tx):
-        task_id = str(uuid.uuid4())[:8]
-        current_version = self.seq_counter
-        snapshot = self.oracle_state.get_version(current_version)
-
-        try:
-            expected_result = self.tx_engine.execute(tx, mode='read', state=snapshot)
-        except Exception as e:
-            print(f"[VP_CO] Oracle Compute Error: {e}")
+        tx_string = json.dumps(tx, sort_keys=True)
+        task_id_source = f"{tx_string}_seq{self.seq_counter}"
+        task_id = hashlib.sha256(task_id_source.encode()).hexdigest()[:16]
+        
+        executors = sorted([nid for nid in self.peers if nid.startswith("EP")])
+        if not executors:
+            print(f"[{self.node_id}] ERROR: No executors available in network.")
             return
-
-        payload = {
-            "type": "COMPUTE_TASK", 
-            "task_id": task_id, 
-            "tx": tx, 
-            "version": current_version,
-            "expected_check": expected_result 
+            
+        hash_int = int(task_id, 16)
+        assigned_executor = executors[hash_int % len(executors)]
+        
+        verifiers = sorted([nid for nid in self.peers if nid.startswith("VP")])
+            
+        self.tasks[task_id] = {
+            "tx": tx,
+            "executor_id": assigned_executor,
+            "votes": {"approve": 0, "reject": 0, "voters": set()},
+            "reassigned": False
         }
 
-        executors = [nid for nid in self.peers if nid.startswith("EP")]
+        assignment_msg = {
+            "type": "TASK_ASSIGNMENT", 
+            "task_id": task_id, 
+            "tx": tx, 
+            "version": self.seq_counter,
+            "executor_id": assigned_executor,
+            "verifiers": verifiers
+        }
+        print(f"[{self.node_id}] Broadcasting Assignment <Task:{task_id[:8]}, Exec:{assigned_executor}>")
         
-        if "EP_Bad" in executors:
-            executors.remove("EP_Bad")
-            executors.insert(0, "EP_Bad")
+        for v_id in verifiers:
+            await self._send_signed_message_fire_and_forget(v_id, assignment_msg)
+            
+        await asyncio.sleep(0.05)
+        
+        await self._send_signed_message_fire_and_forget(assigned_executor, assignment_msg)
 
-        for executor_id in executors:
-            print(f"\n[VP_CO] Assigning Task {task_id} to {executor_id}. Expected: {expected_result}")
+
             
-            success = await self._send_task_and_wait(executor_id, task_id, payload, expected_result)
+    async def handle_task_assignment(self, msg_data):
+        task_id = msg_data.get("task_id")
+        tx = msg_data.get("tx")
+        executor_id = msg_data.get("executor_id")
+        if task_id not in self.verification_state:
+            expected_size = self._calculate_expected_output_size(tx)
             
-            if success:
-                print(f"[VP_CO] Task {task_id} completed successfully by {executor_id}.")
-                return
+            self.verification_state[task_id] = {
+                "expected_size": expected_size,
+                "seen_count": 0,
+                "last_record": None,
+                "executor_id": executor_id
+            }
+            print(f"[{self.node_id}] Registered Verification context for Task {task_id}. Expecting {expected_size} records.")
+
+
+    async def handle_result_chunk(self, msg_data):
+        task_id = msg_data.get("task_id")
+        chunk = msg_data.get("chunk", [])
+        is_final = msg_data.get("is_final", False)
+        sender = msg_data.get("sender_id") 
+        if task_id not in self.verification_state:
+            print(f"[{self.node_id}] WARNING: Received chunk for unknown/unassigned Task {task_id}.")
+            return
+        v_state = self.verification_state[task_id]
+        if sender and sender != v_state["executor_id"]:
+            print(f"[{self.node_id}] BFT ALERT: Chunk sender {sender} is not assigned executor {v_state['executor_id']}!")
+            return
+        is_chunk_valid = True
+        for record in chunk:
+            if not self._is_valid_record(record):
+                print(f"[{self.node_id}] BFT ALERT: Invalid record detected in chunk!")
+                is_chunk_valid = False
+                break
+            if v_state["last_record"] and not self._happens_before(v_state["last_record"], record):
+                print(f"[{self.node_id}] BFT ALERT: Ordering violation (happensBefore failed)!")
+                is_chunk_valid = False
+                break
+            
+            v_state["last_record"] = record
+            v_state["seen_count"] += 1
+        if not is_chunk_valid:
+            print(f"[{self.node_id}] Dropping invalid chunk for task {task_id}.")
+            return
+        if is_final:
+            if v_state["seen_count"] == v_state["expected_size"]:
+                print(f"[{self.node_id}] SUCCESS: Task {task_id} fully verified. ({v_state['seen_count']} records)") 
             else:
-                print(f"[VP_CO] Task failed or mismatched on {executor_id}. Re-assigning...")
-                
-        print(f"[VP_CO] CRITICAL: Task {task_id} failed on ALL available nodes.")
-        
+                print(f"[{self.node_id}] BFT ALERT: Output size mismatch for Task {task_id}! Expected {v_state['expected_size']}, got {v_state['seen_count']}.")
+            del self.verification_state[task_id]
+            
 
+    async def _send_signed_message_fire_and_forget(self, target_node_id, payload_dict):
+        if target_node_id not in self.peers:
+            return
+        target_info = self.peers[target_node_id]
+        content_str = get_deterministic_string(payload_dict)
+        signature = self.crypto.sign(content_str)
+        
+        final_payload = {
+            "sender_id" : self.node_id,
+            "content" : content_str,
+            "signature" : signature
+        }
+        
+        try:
+            reader, writer = await asyncio.open_connection(
+                target_info.get('ip', '127.0.0.1'), target_info['port']
+            )
+            writer.write(json.dumps(final_payload).encode())
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        except Exception as e:
+            print(f"[{self.node_id}] Failed to send message to {target_node_id}: {e}")
+            
+            
+            
     async def submit_task_with_retry(self, target_nodes, args, expected_check=None):
         task_id = str(uuid.uuid4())[:8]
         
@@ -205,27 +317,49 @@ class CoordinatorNode(Node):
         finally:
             self.pending_tasks.pop(task_id, None)
             
-    async def _send_signed_message_fire_and_forget(self, target_node_id, payload_dict):
-        if target_node_id not in self.peers:
+    async def reassign_task(self, old_task_id):
+        old_task = self.tasks.get(old_task_id)
+        if not old_task:
             return
             
-        target_info = self.peers[target_node_id]
-        content_str = get_deterministic_string(payload_dict)
-        signature = self.crypto.sign(content_str)
-        
-        final_payload = {
-            "sender_id" : self.node_id,
-            "content" : content_str,
-            "signature" : signature
+        original_tx = old_task.get("tx")
+        bad_executor = old_task.get("executor_id")
+
+        executors = sorted([nid for nid in self.peers if nid.startswith("EP")])
+        new_executor = next((ep for ep in executors if ep != bad_executor), None)
+
+        if not new_executor:
+            print(f"[{self.node_id}] FATAL: No healthy executors left to reassign Task {old_task_id[:8]}!")
+            return
+
+        new_task_id = hashlib.sha256(f"{old_task_id}_retry".encode()).hexdigest()[:16]
+
+        print(f"[{self.node_id}] ⚡ REASSIGNING! Task {old_task_id[:8]} taken from {bad_executor} -> Given to {new_executor} (New Task ID: {new_task_id[:8]})")
+
+        self.tasks[new_task_id] = {
+            "tx": original_tx,
+            "executor_id": new_executor,
+            "votes": {"approve": 0, "reject": 0, "voters": set()},
+            "reassigned": False
         }
-        
-        try:
-            reader, writer = await asyncio.open_connection(
-                target_info.get('ip', '127.0.0.1'), target_info['port']
-            )
-            writer.write(json.dumps(final_payload).encode())
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-        except Exception as e:
-            print(f"[VP_CO] Failed to send update to {target_node_id}: {e}")
+
+        verifiers = sorted([nid for nid in self.peers if nid.startswith("VP")])
+
+        assignment_msg = {
+            "type": "TASK_ASSIGNMENT", 
+            "task_id": new_task_id, 
+            "tx": original_tx, 
+            "version": self.seq_counter,
+            "executor_id": new_executor,
+            "verifiers": verifiers
+        }
+
+        for v_id in verifiers:
+            await self._send_signed_message_fire_and_forget(v_id, assignment_msg)
+            
+        await asyncio.sleep(0.05)
+        await self._send_signed_message_fire_and_forget(new_executor, assignment_msg)
+
+
+
+            

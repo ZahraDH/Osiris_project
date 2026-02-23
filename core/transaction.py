@@ -44,7 +44,6 @@ class TransactionEngine:
             val = state.get(key, 0)
             return val * factor
         elif op == "SUM_ALL":
-
             total = 0
             for v in state.values():
                 if isinstance(v, (int, float)):
@@ -53,3 +52,14 @@ class TransactionEngine:
         else:
             raise ValueError(f"Unknown READ op: {op}")
 
+    def execute_streaming(self, tx, state):
+        result = self.execute(tx, mode='read', state=state)
+
+        if isinstance(result, list):
+            return result
+        elif isinstance(result, dict):
+            return [result]
+        elif result is None:
+            return []
+        else:
+            return [{"result": result}]
