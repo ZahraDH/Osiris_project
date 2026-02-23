@@ -100,6 +100,9 @@ class ExecutorNode(Node):
         return True
 
     async def execute_and_stream(self, task_id):
+        if self.node_id == "EP_Bad":  
+            print(f"\n [{self.node_id}] SIMULATING SLOW NODE: Freezing for 10 seconds to trigger timeout...\n")
+            await asyncio.sleep(10)
         assignment = list(self.assignment_buffer[task_id].values())[0]
         tx = assignment["tx"]
         version = assignment.get("version") 

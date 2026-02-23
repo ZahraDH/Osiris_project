@@ -27,6 +27,8 @@ class CoordinatorNode(Node):
         self.global_seq = 0
         self.pending_consensus = {}
         self.quorum = self.f + 1 
+        self.TIMEOUT_LIMIT = 5.0  
+        self.active_timeouts = {}
 
     async def process_message(self, message):
         if 'signature' in message:
@@ -90,9 +92,17 @@ class CoordinatorNode(Node):
                     self.tasks[task_id]["votes"]["voters"].add(verifier_id)
                     if is_valid:
                         self.tasks[task_id]["votes"]["approve"] += 1
+                        if self.tasks[task_id]["votes"]["approve"] >= self.quorum:
+                            if task_id in self.active_timeouts:
+                                self.active_timeouts[task_id].cancel()
+                                del self.active_timeouts[task_id]
+                                print(f"[TIMER STOPPED] Task {task_id[:8]} successfully verified in time!")
                     else:
                         self.tasks[task_id]["votes"]["reject"] += 1
                         if self.tasks[task_id]["votes"]["reject"] >= self.quorum and not self.tasks[task_id]["reassigned"]:
+                            if task_id in self.active_timeouts:
+                                self.active_timeouts[task_id].cancel()
+                                del self.active_timeouts[task_id]
                             self.tasks[task_id]["reassigned"] = True
                             asyncio.create_task(self.reassign_task(task_id))
             return {"status": "received"}
@@ -242,6 +252,7 @@ class CoordinatorNode(Node):
             
         await asyncio.sleep(0.05)
         await self._send_signed_message_fire_and_forget(assigned_executor, assignment_msg)
+        self.start_timer_for_task(task_id, assigned_executor)
         
 
             
@@ -428,6 +439,29 @@ class CoordinatorNode(Node):
             
         await asyncio.sleep(0.05)
         await self._send_signed_message_fire_and_forget(new_executor, assignment_msg)
+        self.start_timer_for_task(new_task_id, new_executor)
+        
+    def start_timer_for_task(self, task_id, executor_id):
+        if task_id in self.active_timeouts:
+            self.active_timeouts[task_id].cancel()
+            
+        timer_task = asyncio.create_task(self._timeout_handler(task_id, executor_id))
+        self.active_timeouts[task_id] = timer_task
+
+
+    async def _timeout_handler(self, task_id, executor_id):
+        try:
+            await asyncio.sleep(self.TIMEOUT_LIMIT)
+            print(f"\n[TIMEOUT DETECTED] Executor '{executor_id}' did not respond in time for task '{task_id}'!")
+            
+            if task_id in self.active_timeouts:
+                del self.active_timeouts[task_id]
+            print(f"[REASSIGN] Removing '{executor_id}' from reliable executors and reassigning task...")
+            await self.reassign_task(task_id) 
+
+        except asyncio.CancelledError:
+            pass
+
 
 
 
