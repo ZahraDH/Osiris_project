@@ -96,6 +96,14 @@ class CoordinatorNode(Node):
                             self.tasks[task_id]["reassigned"] = True
                             asyncio.create_task(self.reassign_task(task_id))
             return {"status": "received"}
+        
+        elif msg_type == "STATE_UPDATE":
+            print(f"[{self.node_id}] Acknowledged State Update Seq {msg_data.get('seq')}")
+            return {"status": "received"}
+            
+        elif msg_type is not None:
+            pass
+            return {"status": "received"}
             
         return await super().process_message(message)
 

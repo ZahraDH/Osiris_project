@@ -57,11 +57,19 @@ async def run_test():
         print("FAIL: Honest Executor state mismatch.")
 
 
-    print("\n--- SCENARIO B: COMPUTATION & CHUNK VERIFICATION (OsirisBFT) ---")
-    tx_sum = {"op": "SUM_ALL", "args": {}}
-    print("   [Client] Requesting SUM_ALL... sending to all 3 Coordinators...")
-    await client.submit_transaction(tx_sum, targets=["CO_1", "CO_2", "CO_3"])
-    await asyncio.sleep(3) 
+    print("\n--- SCENARIO B: COMPUTATION & FRAUD DETECTION (OsirisBFT) ---")
+    print("   [Client] Sending Multiple SUM_ALL requests to ensure EP_Bad gets selected...")
+    
+
+    for i in range(1, 4):
+        print(f"\n   -> Submitting Request {i} ...")
+        tx_sum = {"op": "SUM_ALL", "args": {"req_id": i}}
+        await client.submit_transaction(tx_sum, targets=["CO_1", "CO_2", "CO_3"])
+        await asyncio.sleep(1.5) 
+        
+    print("\n--- Waiting for Verifications and Reassignments (5s) ---")
+    await asyncio.sleep(5) 
+    
     print("--- TEST COMPLETE ---")
     
 

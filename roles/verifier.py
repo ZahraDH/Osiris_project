@@ -4,7 +4,7 @@ import json
 from core.node import Node
 from core.state import VersionedKVStore
 from core.transaction import TransactionEngine
-from core.verification import VerificationOperators
+from core.verification import VerificationOperators 
 from core.types import MessageType
 from utils.transfer_to_string import get_deterministic_string
 
@@ -40,22 +40,20 @@ class VerifierNode(Node):
 
         msg_type = msg_data.get("type")
 
-
-        if msg_type == MessageType.STATE_UPDATE or msg_type == "STATE_UPDATE":
+        if msg_type in [MessageType.STATE_UPDATE, "STATE_UPDATE"]:
             await self.handle_state_update(msg_data)
             return {"status": "received"} 
 
-        elif msg_type == MessageType.TASK_ASSIGNMENT or msg_type == "TASK_ASSIGNMENT":
+        elif msg_type in [MessageType.TASK_ASSIGNMENT, "TASK_ASSIGNMENT"]:
             await self.handle_assignment(msg_data, message.get("signature") if isinstance(message, dict) else None)
             return {"status": "received"}  
 
-        elif msg_type == MessageType.CHUNK_RESULT or msg_type == "CHUNK_RESULT":
+        elif msg_type in [MessageType.CHUNK_RESULT, "CHUNK_RESULT"]:
             sender_name = message.get("sender_id") or msg_data.get("sender") or msg_data.get("node_id") or "Unknown"
             await self.handle_result_chunk(msg_data, sender_name)
             return {"status": "received"}  
         
         return await super().process_message(message)
-
 
     async def handle_state_update(self, payload):
         seq = payload.get("seq")
@@ -86,9 +84,7 @@ class VerifierNode(Node):
         }
 
     async def handle_result_chunk(self, payload, sender_id):
-        
         task_id = payload.get("task_id")
-        
         chunk_data = payload.get("chunk_data", payload.get("chunk", payload.get("data", [])))
         is_final = payload.get("is_final", False)    
         
@@ -102,17 +98,6 @@ class VerifierNode(Node):
             chunk_data = payload.get("result", [])
 
         safe_task_id = str(task_id)[:8] if task_id else "UNKNOWN"
-        is_fraud = False            
-        if chunk_data == -999999 or chunk_data == "-999999":
-            is_fraud = True
-
-        if is_fraud:
-            print(f"[{self.node_id}] BFT ALERT: FRAUD DETECTED! Rejecting fake chunk from {sender_id} for Task {safe_task_id}")
-            if task_id:
-                await self.send_vote(task_id, False, "Malicious BFT Node Detected")
-                if task_id in self.active_verification_sessions:
-                    del self.active_verification_sessions[task_id]
-            return
 
         if isinstance(chunk_data, dict):
             chunk_data = [chunk_data]
@@ -136,8 +121,8 @@ class VerifierNode(Node):
 
         is_chunk_valid = VerificationOperators.verify_records_validity(chunk_data, tx)
         if not is_chunk_valid:
-            print(f"[{self.node_id}] REJECTED Chunk for {safe_task_id}: Invalid records detected.")
-            await self.send_vote(task_id, False, "Invalid record format")
+            print(f"[{self.node_id}] REJECTED Chunk for {safe_task_id}: Invalid records or FRAUD detected.")
+            await self.send_vote(task_id, False, "Invalid record format or malicious value")
             del self.active_verification_sessions[task_id]
             return
 
@@ -145,43 +130,28 @@ class VerifierNode(Node):
         session["seen_records"] += len(chunk_data)
 
         if is_final:
+            seen = session.get("seen_records", 0)
+            
             expected_size = VerificationOperators.estimate_output_size(tx)
             
-            op_type = ""
-            if isinstance(tx, dict):
-                op_type = tx.get("op", "")
-                if not op_type and "task" in tx and isinstance(tx["task"], dict):
-                    op_type = tx["task"].get("op", "")
-            
-            seen = session.get("seen_records", 0)
-            AGGREGATION_OPS = ["SUM_ALL", "COUNT", "MAX", "MIN", "AVERAGE"]
-            
-            if op_type in AGGREGATION_OPS:
-                expected_size = 1
-            
-            print(f"🔍 [DEBUG] Verifier {self.node_id} | Task: {safe_task_id} | Op: '{op_type}' | Seen: {seen} | Expected: {expected_size}")
+            print(f"[DEBUG] Verifier {self.node_id} | Task: {safe_task_id} | Seen: {seen} | Expected: {expected_size}")
 
-            
             if expected_size != -1 and seen != expected_size:
                 print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Size mismatch. (Seen: {seen}, Expected: {expected_size})")
                 await self.send_vote(task_id, False, "Output size mismatch")
             
-            elif op_type not in AGGREGATION_OPS and not VerificationOperators.verify_ordering(session["received_chunks"]):
-                print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Ordering verification failed.")
+            elif not VerificationOperators.verify_ordering(session["received_chunks"]):
+                print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Ordering verification failed (happensBefore condition violated).")
                 await self.send_vote(task_id, False, "Records are not properly ordered")
                 
             else:
-                print(f"[{self.node_id}] VERIFIED Task {safe_task_id}. Total: {seen}")
+                print(f"[{self.node_id}] VERIFIED Task {safe_task_id}. Total records: {seen}")
                 await self.send_vote(task_id, True, session["received_chunks"])
 
             if task_id in self.active_verification_sessions:
                 del self.active_verification_sessions[task_id]
 
-
-
-
     async def send_vote(self, task_id, is_valid, result_or_reason):
-        """Sends a signed vote back to the Coordinator (VP_CO)"""
         vote_payload = {
             "type": MessageType.VERIFICATION_VOTE,
             "task_id": task_id,
