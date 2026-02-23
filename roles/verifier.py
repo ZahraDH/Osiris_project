@@ -107,7 +107,7 @@ class VerifierNode(Node):
             is_fraud = True
 
         if is_fraud:
-            print(f"[{self.node_id}] BFT ALERT: FRAUD DETECTED! Rejecting fake chunk from {sender_id} for Task {safe_task_id} 🛑")
+            print(f"[{self.node_id}] BFT ALERT: FRAUD DETECTED! Rejecting fake chunk from {sender_id} for Task {safe_task_id}")
             if task_id:
                 await self.send_vote(task_id, False, "Malicious BFT Node Detected")
                 if task_id in self.active_verification_sessions:
@@ -125,11 +125,11 @@ class VerifierNode(Node):
         session = self.active_verification_sessions.get(task_id)
 
         if not session:
-            print(f"🧐 [{self.node_id}] Received chunk for UNKNOWN task {safe_task_id}. Ignoring.")
+            print(f"[{self.node_id}] Received chunk for UNKNOWN task {safe_task_id}. Ignoring.")
             return
 
         if sender_id != session.get("executor_id"):
-            print(f"🧐 [{self.node_id}] Unauthorized sender {sender_id} for Task {safe_task_id}.")
+            print(f"[{self.node_id}] Unauthorized sender {sender_id} for Task {safe_task_id}.")
             return
 
         tx = session["tx"]

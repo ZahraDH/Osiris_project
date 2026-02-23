@@ -23,6 +23,10 @@ class CoordinatorNode(Node):
         self.verification_state = {}
         self.tx_engine = TransactionEngine()
         self.tasks = {}
+        self.is_leader = (self.node_id == "CO_1" or self.node_id == "VP_CO_1") 
+        self.global_seq = 0
+        self.pending_consensus = {}
+        self.quorum = self.f + 1 
 
     async def process_message(self, message):
         if 'signature' in message:
@@ -33,11 +37,8 @@ class CoordinatorNode(Node):
             is_valid = self.crypto.verify(sender_id, content_str, signature)
             
             if not is_valid:
-                print(f"[VP_CO] Invalid signature on result from {sender_id}. Dropping.")
+                print(f"[BFT ALERT] Invalid signature from {sender_id}. Dropping fake message!")
                 return {"status": "error"}
-            else:
-                print(f"[VP_CO] Valid signature from {sender_id}")
-                pass
             
             try:
                 msg_data = json.loads(content_str)
@@ -52,19 +53,23 @@ class CoordinatorNode(Node):
             payload = msg_data.get("payload", msg_data)
             await self.handle_client_request(payload)
             return {"status": "received"}
-        
+            
+        elif msg_type == "CONSENSUS_PROPOSE":
+            await self.handle_consensus_propose(msg_data, message.get("sender_id"))
+            return {"status": "received"}
+            
+        elif msg_type == "CONSENSUS_VOTE":
+            await self.handle_consensus_vote(msg_data, message.get("sender_id"))
+            return {"status": "received"}
+
         elif msg_type == "RESULT":
             task_id = msg_data.get("task_id")
             result = msg_data.get("result")
             sender = msg_data.get("sender")
-            
             if task_id in self.pending_tasks:
                 future = self.pending_tasks[task_id]
                 if not future.done():
                     future.set_result((sender, result))
-            return {"status": "received"}
-            
-        elif msg_type == "STATE_UPDATE" or msg_type == getattr(MessageType, 'STATE_UPDATE', 'STATE_UPDATE'):
             return {"status": "received"}
             
         elif msg_type == "TASK_ASSIGNMENT" or msg_type == getattr(MessageType, 'TASK_ASSIGNMENT', 'TASK_ASSIGNMENT'):
@@ -73,81 +78,138 @@ class CoordinatorNode(Node):
         
         elif msg_type == "VERIFICATION_VOTE" or msg_type == getattr(MessageType, 'VERIFICATION_VOTE', 'VERIFICATION_VOTE'):
             task_id = msg_data.get("task_id", "UNKNOWN")
-            short_task_id = task_id[:8]
             verifier_id = msg_data.get("verifier_id", "Unknown")
             is_valid = msg_data.get("is_valid", False)
             reason = msg_data.get("result", "")
             
             status = "APPROVED" if is_valid else "REJECTED"
-            print(f"[{self.node_id}] Vote from {verifier_id} for Task {task_id}: {status} -> {reason}")
+            print(f"[{self.node_id}] Vote from {verifier_id} for Task {task_id[:8]}: {status}")
             
             if task_id in self.tasks:
                 if verifier_id not in self.tasks[task_id]["votes"]["voters"]:
                     self.tasks[task_id]["votes"]["voters"].add(verifier_id)
-                    
                     if is_valid:
                         self.tasks[task_id]["votes"]["approve"] += 1
                     else:
                         self.tasks[task_id]["votes"]["reject"] += 1
-                        
-                        if self.tasks[task_id]["votes"]["reject"] >= 2 and not self.tasks[task_id]["reassigned"]:
+                        if self.tasks[task_id]["votes"]["reject"] >= self.quorum and not self.tasks[task_id]["reassigned"]:
                             self.tasks[task_id]["reassigned"] = True
                             asyncio.create_task(self.reassign_task(task_id))
-            
             return {"status": "received"}
-            
-        else:
-            print(f"[{self.node_id}] Received: UNKNOWN TYPE -> {msg_type}")
             
         return await super().process_message(message)
 
     
-    
     async def handle_client_request(self, tx):
         if isinstance(tx, str):
-            try:
-                tx = json.loads(tx)
-            except:
-                pass
+            try: tx = json.loads(tx)
+            except: pass
 
-        op = tx.get("op", "").upper()
-        if op in ["SET", "ADD", "SUB", "ADD_EDGE"]:
-            print(f"[VP_CO] Client requests WRITE: {op}")
-            await self.propose_state_update(tx)
+        if self.is_leader:
+            await self.initiate_consensus(tx)
         else:
-            print(f"[VP_CO] Client requests READ: {op}")
-            await self.assign_compute_task(tx)
-
-    async def propose_state_update(self, tx):
-        self.seq_counter += 1
-        seq = self.seq_counter
-
-        update_msg = {
-            "type": "STATE_UPDATE", 
-            "seq": seq, 
-            "tx": tx
+            print(f"[{self.node_id}] I am a follower. Waiting for Leader to PROPOSE this tx.")
+            
+            
+    async def initiate_consensus(self, tx):
+        self.global_seq += 1
+        proposed_seq = self.global_seq
+        tx_id = tx.get("id", str(uuid.uuid4())[:8])
+        tx["id"] = tx_id
+        
+        print(f"[LEADER {self.node_id}] Proposing Sequence {proposed_seq} for TX {tx_id}")
+        
+        propose_msg = {
+            "type": "CONSENSUS_PROPOSE",
+            "tx": tx,
+            "seq": proposed_seq
         }
         
-        print(f"[{self.node_id}] Proposing State Update Seq {seq}: {tx.get('args')}")
+        self.pending_consensus[tx_id] = {
+            "tx": tx,
+            "seq": proposed_seq,
+            "votes": {self.node_id}, 
+            "committed": False
+        }
         
+        await self._broadcast_to_coordinators(propose_msg)
+
+    async def handle_consensus_propose(self, msg_data, sender_id):
+        tx = msg_data["tx"]
+        proposed_seq = msg_data["seq"]
+        tx_id = tx["id"]
+        
+        if proposed_seq > self.global_seq:
+            self.global_seq = proposed_seq
+            print(f"[{self.node_id}] Validated PROPOSE from {sender_id}. Sequence: {proposed_seq}. Voting YES.")
+            
+            self.pending_consensus[tx_id] = {
+                "tx": tx,
+                "seq": proposed_seq,
+                "votes": {sender_id, self.node_id}, 
+                "committed": False
+            }
+            
+            vote_msg = {
+                "type": "CONSENSUS_VOTE",
+                "tx_id": tx_id,
+                "seq": proposed_seq
+            }
+            await self._broadcast_to_coordinators(vote_msg)
+
+    async def handle_consensus_vote(self, msg_data, voter_id):
+        tx_id = msg_data["tx_id"]
+        if tx_id in self.pending_consensus:
+            state = self.pending_consensus[tx_id]
+            state["votes"].add(voter_id)
+            
+            print(f"[{self.node_id}] Vote received from {voter_id}. Total votes: {len(state['votes'])}/{self.quorum}")
+            
+            if len(state["votes"]) >= self.quorum and not state["committed"]:
+                state["committed"] = True
+                agreed_seq = state["seq"]
+                tx = state["tx"]
+                
+                print(f"[CONSENSUS REACHED - {self.node_id}] TX {tx_id} safely assigned to Sequence {agreed_seq}!")
+                
+                op = tx.get("op", "").upper()
+                if op in ["SET", "ADD", "SUB", "ADD_EDGE"]:
+                    await self.propose_state_update(tx, agreed_seq, list(state["votes"]))
+                else:
+                    await self.assign_compute_task(tx, agreed_seq, list(state["votes"]))
+                    
+    async def _broadcast_to_coordinators(self, payload_dict):
+        coordinators = [nid for nid in self.peers if nid.startswith("CO_") or nid.startswith("VP_CO")]
+        for co_id in coordinators:
+            if co_id != self.node_id:
+                await self._send_signed_message_fire_and_forget(co_id, payload_dict)
+
+
+
+    async def propose_state_update(self, tx, agreed_seq, consensus_proof):
+        update_msg = {
+            "type": "STATE_UPDATE", 
+            "seq": agreed_seq, 
+            "tx": tx,
+            "consensus_proof": consensus_proof
+        }
+        print(f"[{self.node_id}] Broadcasting State Update Seq {agreed_seq}")
         for peer_id in self.peers:
             await self._send_signed_message_fire_and_forget(peer_id, update_msg)
             
 
-    async def assign_compute_task(self, tx):
+    async def assign_compute_task(self, tx, agreed_seq, consensus_proof):
         tx_string = json.dumps(tx, sort_keys=True)
-        task_id_source = f"{tx_string}_seq{self.seq_counter}"
+        task_id_source = f"{tx_string}_seq{agreed_seq}"
         task_id = hashlib.sha256(task_id_source.encode()).hexdigest()[:16]
         
         executors = sorted([nid for nid in self.peers if nid.startswith("EP")])
-        if not executors:
-            print(f"[{self.node_id}] ERROR: No executors available in network.")
-            return
+        if not executors: return
             
         hash_int = int(task_id, 16)
         assigned_executor = executors[hash_int % len(executors)]
         
-        verifiers = sorted([nid for nid in self.peers if nid.startswith("VP")])
+        verifiers = sorted([nid for nid in self.peers if nid.startswith("VP") and "CO" not in nid])
             
         self.tasks[task_id] = {
             "tx": tx,
@@ -160,19 +222,19 @@ class CoordinatorNode(Node):
             "type": "TASK_ASSIGNMENT", 
             "task_id": task_id, 
             "tx": tx, 
-            "version": self.seq_counter,
+            "version": agreed_seq,
             "executor_id": assigned_executor,
-            "verifiers": verifiers
+            "verifiers": verifiers,
+            "consensus_proof": consensus_proof
         }
-        print(f"[{self.node_id}] Broadcasting Assignment <Task:{task_id[:8]}, Exec:{assigned_executor}>")
+        print(f"[{self.node_id}] Broadcasting Assignment <Task:{task_id[:8]}, Exec:{assigned_executor}> to Verifiers")
         
         for v_id in verifiers:
             await self._send_signed_message_fire_and_forget(v_id, assignment_msg)
             
         await asyncio.sleep(0.05)
-        
         await self._send_signed_message_fire_and_forget(assigned_executor, assignment_msg)
-
+        
 
             
     async def handle_task_assignment(self, msg_data):
@@ -228,8 +290,7 @@ class CoordinatorNode(Node):
             
 
     async def _send_signed_message_fire_and_forget(self, target_node_id, payload_dict):
-        if target_node_id not in self.peers:
-            return
+        if target_node_id not in self.peers: return
         target_info = self.peers[target_node_id]
         content_str = get_deterministic_string(payload_dict)
         signature = self.crypto.sign(content_str)
@@ -249,7 +310,7 @@ class CoordinatorNode(Node):
             writer.close()
             await writer.wait_closed()
         except Exception as e:
-            print(f"[{self.node_id}] Failed to send message to {target_node_id}: {e}")
+            pass
             
             
             
@@ -334,7 +395,7 @@ class CoordinatorNode(Node):
 
         new_task_id = hashlib.sha256(f"{old_task_id}_retry".encode()).hexdigest()[:16]
 
-        print(f"[{self.node_id}] ⚡ REASSIGNING! Task {old_task_id[:8]} taken from {bad_executor} -> Given to {new_executor} (New Task ID: {new_task_id[:8]})")
+        print(f"[{self.node_id}]REASSIGNING! Task {old_task_id[:8]} taken from {bad_executor} -> Given to {new_executor} (New Task ID: {new_task_id[:8]})")
 
         self.tasks[new_task_id] = {
             "tx": original_tx,
