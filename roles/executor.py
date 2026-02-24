@@ -101,17 +101,14 @@ class ExecutorNode(Node):
         return True
 
     async def execute_and_stream(self, task_id):
-        if self.node_id == "EP_Bad":  
-            print(f"\n [{self.node_id}] SIMULATING SLOW NODE: Freezing for 10 seconds to trigger timeout...\n")
-            await asyncio.sleep(10)
         assignment = list(self.assignment_buffer[task_id].values())[0]
         tx = assignment["tx"]
-        version = assignment.get("version") 
-        
+        version = assignment.get("version")
+
         snapshot = self.store.get_version(version) if version is not None else {}
         if not snapshot:
             snapshot = getattr(self.store, '_state', {})
-            
+
         print(f"[DEBUG EXECUTOR] Task {task_id} | State used for SUM: {snapshot}")
 
         try:
@@ -124,19 +121,19 @@ class ExecutorNode(Node):
                 results = []
             else:
                 results = list(results_iterator)
-                
+
             op = tx.get("op", "")
             if not op and "task" in tx:
                 op = tx["task"].get("op", "")
 
             if op in ["SUM_ALL", "COUNT", "MAX", "MIN", "AVERAGE", "GET"] and results:
                 raw_result = results[0]
-                
+
                 if isinstance(raw_result, dict):
                     val = list(raw_result.values())[0] if raw_result else 0
                 else:
                     val = raw_result
-                
+
                 base_task_id = str(task_id)[:8]
                 proof_material = f"{base_task_id}:{val}".encode()
                 proof = hashlib.sha256(proof_material).hexdigest()
@@ -144,22 +141,21 @@ class ExecutorNode(Node):
 
             chunk = []
             chunk_index = 0
-            
+
             for record in results:
                 chunk.append(record)
-                if len(chunk) >= 100:  
+                if len(chunk) >= 100:
                     await self._broadcast_chunk_to_verifiers(task_id, chunk, chunk_index, is_final=False)
                     chunk = []
                     chunk_index += 1
-            
+
             await self._broadcast_chunk_to_verifiers(task_id, chunk, chunk_index, is_final=True)
             print(f"[{self.node_id}] Successfully streamed all chunks for Task {task_id}")
-        
+
         except Exception as e:
             print(f"[{self.node_id}] Compute Failed for Task {task_id}: {e}")
         finally:
             self.assignment_buffer.pop(task_id, None)
-
 
 
 

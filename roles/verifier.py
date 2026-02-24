@@ -15,6 +15,7 @@ class VerifierNode(Node):
         self.store = VersionedKVStore()
         self.tx_engine = TransactionEngine()
         self.active_verification_sessions = {}
+        self.processed_task_ids = set()
 
         print(f"[Verifier {self.node_id}] Started. Waiting for assignments...")
 
@@ -69,8 +70,19 @@ class VerifierNode(Node):
         tx = payload.get("tx")
         executor_id = payload.get("executor_id")
         version = payload.get("version")
+        target_verifiers = payload.get("verifiers", [])
 
         safe_task_id = str(task_id)[:8] if task_id else "UNKNOWN"
+        if task_id in self.processed_task_ids:
+
+            return
+
+        self.processed_task_ids.add(task_id)
+
+        if executor_id == self.node_id:
+            print(f"[{self.node_id}] ROLE UPDATE: I have been promoted to EXECUTOR for Task {safe_task_id}!")
+            asyncio.create_task(self.perform_execution_role(task_id, tx, target_verifiers))
+            return
         print(f"[{self.node_id}] Assigned to verify Task {safe_task_id} from {executor_id}")
 
         self.active_verification_sessions[task_id] = {
@@ -82,6 +94,42 @@ class VerifierNode(Node):
             "seen_records": 0,     
             "status": "pending"
         }
+    
+    async def perform_execution_role(self, task_id, tx, target_verifiers):
+        print(f"[{self.node_id}] Executing transaction as Promoted Executor...")
+
+        try:
+            result = self.tx_engine.execute(tx, state=self.store)
+            print(f"[{self.node_id}] Execution Check: Result generated: {result}")
+
+            import hashlib
+
+            base_task_id = str(task_id)[:8]
+            proof_material = f"{base_task_id}:{result}".encode()
+            proof = hashlib.sha256(proof_material).hexdigest()
+            chunk_data = [{"result": result, "proof": proof}]
+
+            result_msg = {
+                "type": "CHUNK_RESULT",
+                "task_id": task_id,
+                "chunk_data": chunk_data,
+                "is_final": True,
+                "sender": self.node_id,
+                "executor_id": self.node_id
+            }
+
+            if not target_verifiers:
+                print(f"[{self.node_id}] Warning: No verifiers to send results to!")
+
+            for v_id in target_verifiers:
+                print(f"[{self.node_id}] Sending Result to Verifier: {v_id}")
+                await self._send_signed(v_id, result_msg)
+
+        except Exception as e:
+            print(f"[{self.node_id}] EXECUTION FAILED: {e}")
+
+
+
 
     async def handle_result_chunk(self, payload, sender_id):
         task_id = payload.get("task_id")
@@ -138,10 +186,14 @@ class VerifierNode(Node):
             if expected_size != -1 and seen != expected_size:
                 print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Size mismatch.")
                 await self.send_vote(task_id, False, "Output size mismatch")
+                if task_id in self.active_verification_sessions:
+                    del self.active_verification_sessions[task_id]
             
             elif not VerificationOperators.verify_ordering(session["received_chunks"]):
                 print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Ordering verification failed.")
                 await self.send_vote(task_id, False, "Records are not properly ordered")
+                if task_id in self.active_verification_sessions:
+                    del self.active_verification_sessions[task_id]
                 
             else:
                 op = tx.get("op", "")
@@ -175,9 +227,10 @@ class VerifierNode(Node):
 
                 print(f"[{self.node_id}] VERIFIED Task {safe_task_id}. Cryptographic Proof Validated!")
                 await self.send_vote(task_id, True, session["received_chunks"])
-
             if task_id in self.active_verification_sessions:
                 del self.active_verification_sessions[task_id]
+
+            
 
 
     async def send_vote(self, task_id, is_valid, result_or_reason):
@@ -208,3 +261,4 @@ class VerifierNode(Node):
                 await self.network.send((peer_info.get('ip', '127.0.0.1'), peer_info['port']), msg)
         else:
             await self.send_message(target_id, msg)
+            
