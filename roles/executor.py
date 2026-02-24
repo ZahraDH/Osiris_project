@@ -1,6 +1,7 @@
 # roles/executor.py
 import asyncio
 import json
+import hashlib
 from core.node import Node
 from utils.transfer_to_string import get_deterministic_string
 from core.state import VersionedKVStore
@@ -123,6 +124,23 @@ class ExecutorNode(Node):
                 results = []
             else:
                 results = list(results_iterator)
+                
+            op = tx.get("op", "")
+            if not op and "task" in tx:
+                op = tx["task"].get("op", "")
+
+            if op in ["SUM_ALL", "COUNT", "MAX", "MIN", "AVERAGE", "GET"] and results:
+                raw_result = results[0]
+                
+                if isinstance(raw_result, dict):
+                    val = list(raw_result.values())[0] if raw_result else 0
+                else:
+                    val = raw_result
+                
+                base_task_id = str(task_id)[:8]
+                proof_material = f"{base_task_id}:{val}".encode()
+                proof = hashlib.sha256(proof_material).hexdigest()
+                results = [{"result": val, "proof": proof}]
 
             chunk = []
             chunk_index = 0

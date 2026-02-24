@@ -131,25 +131,54 @@ class VerifierNode(Node):
 
         if is_final:
             seen = session.get("seen_records", 0)
-            
             expected_size = VerificationOperators.estimate_output_size(tx)
             
             print(f"[DEBUG] Verifier {self.node_id} | Task: {safe_task_id} | Seen: {seen} | Expected: {expected_size}")
 
             if expected_size != -1 and seen != expected_size:
-                print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Size mismatch. (Seen: {seen}, Expected: {expected_size})")
+                print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Size mismatch.")
                 await self.send_vote(task_id, False, "Output size mismatch")
             
             elif not VerificationOperators.verify_ordering(session["received_chunks"]):
-                print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Ordering verification failed (happensBefore condition violated).")
+                print(f"[{self.node_id}] REJECTED Task {safe_task_id}: Ordering verification failed.")
                 await self.send_vote(task_id, False, "Records are not properly ordered")
                 
             else:
-                print(f"[{self.node_id}] VERIFIED Task {safe_task_id}. Total records: {seen}")
+                op = tx.get("op", "")
+                if not op and "task" in tx:
+                    op = tx["task"].get("op", "")
+                
+                executor_result_data = session["received_chunks"][0]
+                if isinstance(executor_result_data, dict):
+                    executor_value = executor_result_data.get("result", executor_result_data.get(op, None))
+                    executor_proof = executor_result_data.get("proof", None)
+                else:
+                    executor_value = executor_result_data
+                    executor_proof = None 
+                
+                version_str = getattr(self.store, 'current_version', 'v1')
+                
+                is_valid = VerificationOperators.verify_execution_proof(
+                    task_id=safe_task_id,
+                    op=op,
+                    result=executor_value,
+                    provided_proof=executor_proof,
+                    version_str=version_str
+                )
+                
+                if not is_valid:
+                    print(f"[{self.node_id}] [BFT FRAUD DETECTED] Task {safe_task_id}: Cryptographic proof validation FAILED for result {executor_value}!")
+                    await self.send_vote(task_id, False, "FRAUD: Invalid Execution Proof")
+                    if task_id in self.active_verification_sessions:
+                        del self.active_verification_sessions[task_id]
+                    return
+
+                print(f"[{self.node_id}] VERIFIED Task {safe_task_id}. Cryptographic Proof Validated!")
                 await self.send_vote(task_id, True, session["received_chunks"])
 
             if task_id in self.active_verification_sessions:
                 del self.active_verification_sessions[task_id]
+
 
     async def send_vote(self, task_id, is_valid, result_or_reason):
         vote_payload = {

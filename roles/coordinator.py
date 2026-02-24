@@ -105,8 +105,21 @@ class CoordinatorNode(Node):
                             if task_id in self.active_timeouts:
                                 self.active_timeouts[task_id].cancel()
                                 del self.active_timeouts[task_id]
+                                
+                            bad_executor = self.tasks[task_id].get("executor_id")
+                            if bad_executor and bad_executor not in self.banned_executors:
+                                self.banned_executors.add(bad_executor)
+                                print(f"[BFT DEMOTION] Fraud detected! Executor '{bad_executor}' permanently banned.")
+                                
+                                available_verifiers = sorted([nid for nid in self.peers if nid.startswith("VP") and "CO" not in nid and nid not in self.promoted_verifiers])
+                                if available_verifiers:
+                                    promoted_node = available_verifiers[0]
+                                    self.promoted_verifiers.add(promoted_node)
+                                    print(f"[ROLE SWITCH] Promoted '{promoted_node}' to replace banned node.")
+                                
                             self.tasks[task_id]["reassigned"] = True
                             asyncio.create_task(self.reassign_task(task_id))
+
             return {"status": "received"}
         
         elif msg_type == "STATE_UPDATE":

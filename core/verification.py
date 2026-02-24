@@ -1,5 +1,5 @@
 # core/verification_rules.py
-
+import hashlib
 class VerificationOperators:
     @staticmethod
     def estimate_output_size(tx):
@@ -87,6 +87,17 @@ class VerificationOperators:
                     return False
                     
         return True
+    
+
+    @staticmethod
+    def verify_execution_proof(task_id, op, result, provided_proof, version_str=None):
+        base_task_id = str(task_id)[:8]
+        expected_proof_material = f"{base_task_id}:{result}".encode()
+        expected_proof = hashlib.sha256(expected_proof_material).hexdigest()
+        
+        return provided_proof == expected_proof
+
+
 
 
 
